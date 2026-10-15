@@ -5,6 +5,7 @@
   const MINI_H = 40;       // inner height of the minimized bar
   const MINI_MAX_W = 340;
   const THUMB_W = 72;      // video thumbnail width while minimized
+  const CORNER_GAP = 16;   // distance from the screen edges when parked bottom-right
 
   const ICONS = {
     play:     ['M6 4l14 8-14 8z', true],
@@ -27,18 +28,13 @@
     #stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; }
     #stage video { width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important;
       object-fit: contain; position: static !important; inset: auto !important; transform: none !important; margin: 0 !important; }
-    #msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
-      text-align: center; line-height: 1.4; opacity: .8; pointer-events: none; }
-    #msg:empty { display: none; }
     .row { position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 2px; padding: 0 6px; }
     #bar { bottom: 0; height: 44px; background: linear-gradient(transparent, rgba(0,0,0,.8)); opacity: 0; transition: opacity .15s; }
     body.active #bar, body.paused #bar { opacity: 1; }
-    #mini { display: none; top: 0; bottom: 0; background: #1c1c1e; }
+    #mini { display: none; top: 0; bottom: 0; left: ${THUMB_W}px; background: #1c1c1e; }
     body.min #bar { display: none; }
     body.min #mini { display: flex; }
-    body.min.video #stage { right: auto; width: ${THUMB_W}px; }
-    body.min.video #mini { left: ${THUMB_W}px; }
-    body.min.tab #stage { display: none; }
+    body.min #stage { right: auto; width: ${THUMB_W}px; }
     button { all: unset; flex: none; width: 30px; height: 30px; display: grid; place-items: center;
       border-radius: 6px; cursor: pointer; color: inherit; }
     button:hover { background: rgba(255,255,255,.16); }
@@ -46,7 +42,6 @@
     input[type=range] { flex: 1; min-width: 30px; margin: 0 6px; accent-color: #fff; }
     .time { flex: none; font-variant-numeric: tabular-nums; opacity: .85; padding: 0 4px; }
     .title { flex: 1; min-width: 0; padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .9; }
-    body.tab #stage { cursor: pointer; }
   `;
 
   // ---------- DOM helpers (no innerHTML: some sites enforce Trusted Types) ----------
@@ -111,94 +106,7 @@
     setTimeout(() => host.remove(), onClick ? 10000 : 4000);
   }
 
-  // ---------- Window plumbing ----------
-
-  function closeExisting() {
-    if (window === top && window.documentPictureInPicture?.window) {
-      documentPictureInPicture.window.close();
-      return true;
-    }
-    if (document.pictureInPictureElement) {
-      document.exitPictureInPicture();
-      return true;
-    }
-    return false;
-  }
-
-  async function requestWindow(width, height, retry) {
-    try {
-      return await documentPictureInPicture.requestWindow({ width, height });
-    } catch (e) {
-      if (e.name === 'NotAllowedError') notice('▶ Click to open floating window', retry);
-      else notice('PiP Plus: ' + e.message);
-      return null;
-    }
-  }
-
-  // Shared chrome for both modes: stylesheet, rows, auto-hiding bar, minimize/restore.
-  function shell(pip, mode, { onMinimize, onRestore } = {}) {
-    const doc = pip.document;
-    const sheet = new pip.CSSStyleSheet();
-    sheet.replaceSync(CSS);
-    doc.adoptedStyleSheets = [sheet];
-    doc.title = document.title;
-    doc.body.classList.add(mode);
-
-    const stage = el(doc, 'div', { id: 'stage' });
-    const msg = el(doc, 'div', { id: 'msg' });
-    const bar = el(doc, 'div', { id: 'bar', class: 'row' });
-    const mini = el(doc, 'div', { id: 'mini', class: 'row' });
-    doc.body.append(stage, msg, bar, mini);
-
-    let hideTimer;
-    const poke = () => {
-      doc.body.classList.add('active');
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => doc.body.classList.remove('active'), 2000);
-    };
-    doc.addEventListener('mousemove', poke);
-    poke();
-
-    let saved = null;
-    const isMin = () => doc.body.classList.contains('min');
-
-    const minimize = () => {
-      if (isMin()) return;
-      saved = { w: pip.outerWidth, h: pip.outerHeight };
-      const frameH = pip.outerHeight - pip.innerHeight;
-      doc.body.classList.add('min');
-      try { pip.resizeTo(Math.min(saved.w, MINI_MAX_W), MINI_H + frameH); } catch {}
-      onMinimize?.();
-    };
-
-    const restore = () => {
-      if (!isMin()) return;
-      doc.body.classList.remove('min');
-      if (saved) try { pip.resizeTo(saved.w, saved.h); } catch {}
-      onRestore?.();
-    };
-
-    const toggleMin = () => (isMin() ? restore() : minimize());
-    mini.addEventListener('dblclick', restore);
-
-    const titles = [];
-    const title = () => {
-      const t = el(doc, 'div', { class: 'title', textContent: document.title });
-      titles.push(t);
-      return t;
-    };
-    const titleTimer = setInterval(() => {
-      doc.title = document.title;
-      for (const t of titles) t.textContent = document.title;
-    }, 2000);
-    pip.addEventListener('pagehide', () => clearInterval(titleTimer));
-
-    const focusTab = () => chrome.runtime.sendMessage({ type: 'focusTab' });
-
-    return { doc, stage, msg, bar, mini, minimize, restore, toggleMin, isMin, title, focusTab };
-  }
-
-  // ---------- Video mode ----------
+  // ---------- Finding the video ----------
 
   function pickVideo() {
     let best = null, bestScore = 0;
@@ -212,9 +120,12 @@
     return best;
   }
 
+  function isOpen() {
+    return (window === top && !!window.documentPictureInPicture?.window) || !!document.pictureInPictureElement;
+  }
+
   function score() {
-    if (window === top && window.documentPictureInPicture?.window) return 1e15; // so a 2nd press closes it
-    if (document.pictureInPictureElement) return 1e15;
+    if (isOpen()) return 1e15; // so a second press closes it
     const v = pickVideo();
     if (!v) return 0;
     const r = v.getBoundingClientRect();
@@ -228,8 +139,44 @@
     });
   }
 
+  // ---------- Minimize / restore ----------
+
+  // Minimize shrinks the window to a bar and parks it in the bottom-right corner of the screen;
+  // restore puts it back at its old size and position.
+  function sizer(pip, doc) {
+    let saved = null;
+    const isMin = () => doc.body.classList.contains('min');
+
+    const minimize = () => {
+      if (isMin()) return;
+      saved = { w: pip.outerWidth, h: pip.outerHeight, x: pip.screenX, y: pip.screenY };
+      const w = Math.min(saved.w, MINI_MAX_W);
+      const h = MINI_H + (pip.outerHeight - pip.innerHeight);
+      doc.body.classList.add('min');
+      try { pip.resizeTo(w, h); } catch {}
+      const s = pip.screen;
+      const x = s.availLeft + s.availWidth - w - CORNER_GAP;
+      const y = s.availTop + s.availHeight - h - CORNER_GAP;
+      try { pip.moveTo(x, y); } catch {}
+    };
+
+    const restore = () => {
+      if (!isMin()) return;
+      doc.body.classList.remove('min');
+      if (!saved) return;
+      try { pip.resizeTo(saved.w, saved.h); } catch {}
+      try { pip.moveTo(saved.x, saved.y); } catch {}
+    };
+
+    return { isMin, minimize, restore, toggle: () => (isMin() ? restore() : minimize()) };
+  }
+
+  // ---------- Open ----------
+
   async function openVideo() {
-    if (closeExisting()) return;
+    if (window === top && window.documentPictureInPicture?.window) return documentPictureInPicture.window.close();
+    if (document.pictureInPictureElement) return document.exitPictureInPicture();
+
     const video = pickVideo();
     if (!video) return notice('PiP Plus: no video found on this page');
 
@@ -237,48 +184,64 @@
     if (window !== top || !window.documentPictureInPicture) return nativePip(video);
 
     const ratio = video.videoWidth ? video.videoHeight / video.videoWidth : 9 / 16;
-    const pip = await requestWindow(480, Math.round(480 * ratio), openVideo);
-    if (!pip) return;
+    let pip;
+    try {
+      pip = await documentPictureInPicture.requestWindow({ width: 480, height: Math.round(480 * ratio) });
+    } catch (e) {
+      if (e.name === 'NotAllowedError') notice('▶ Click to open floating window', openVideo);
+      else notice('PiP Plus: ' + e.message);
+      return;
+    }
 
-    const ui = shell(pip, 'video');
-    const { doc } = ui;
+    const doc = pip.document;
+    const sheet = new pip.CSSStyleSheet();
+    sheet.replaceSync(CSS);
+    doc.adoptedStyleSheets = [sheet];
+    doc.title = document.title;
+
+    const stage = el(doc, 'div', { id: 'stage' });
+    const bar = el(doc, 'div', { id: 'bar', class: 'row' });
+    const mini = el(doc, 'div', { id: 'mini', class: 'row' });
+    doc.body.append(stage, bar, mini);
+
     const ac = new AbortController();
     const on = (t, ev, fn) => t.addEventListener(ev, fn, { signal: ac.signal });
+    const size = sizer(pip, doc);
 
-    // Move the real <video> into the window (same decoder, no re-encoding), leave a placeholder.
+    // Move the real <video> into the window (same decoder, no copy), leave a placeholder.
     const placeholder = document.createElement('div');
     placeholder.style.cssText = video.style.cssText;
     placeholder.style.background = '#000';
     const savedControls = video.controls;
     video.replaceWith(placeholder);
     video.controls = false;
-    ui.stage.append(video);
+    stage.append(video);
 
     const togglePlay = () => (video.paused ? video.play() : video.pause());
     const skip = s => { video.currentTime = Math.max(0, Math.min(video.duration || Infinity, video.currentTime + s)); };
+    const backToTab = () => { pip.close(); chrome.runtime.sendMessage({ type: 'focusTab' }); };
 
     const play = button(doc, 'pause', 'Play/Pause (Space)', togglePlay);
     const miniPlay = button(doc, 'pause', 'Play/Pause', togglePlay);
     const mute = button(doc, 'vol', 'Mute', () => { video.muted = !video.muted; });
     const seek = el(doc, 'input', { type: 'range', min: 0, max: 1000, value: 0 });
     const time = el(doc, 'div', { class: 'time' });
+    const title = el(doc, 'div', { class: 'title', textContent: document.title });
     let seeking = false;
     seek.addEventListener('input', () => { seeking = true; if (video.duration) video.currentTime = seek.value / 1000 * video.duration; });
     seek.addEventListener('change', () => { seeking = false; });
 
-    const backToTab = () => { pip.close(); ui.focusTab(); };
-
-    ui.bar.append(
+    bar.append(
       play,
       button(doc, 'back', 'Back 10s (←)', () => skip(-10)),
       button(doc, 'fwd', 'Forward 10s (→)', () => skip(10)),
       seek, time, mute,
-      button(doc, 'minimize', 'Minimize (M)', ui.minimize),
+      button(doc, 'minimize', 'Minimize (M)', size.minimize),
       button(doc, 'toTab', 'Back to tab', backToTab),
     );
-    ui.mini.append(
-      miniPlay, ui.title(),
-      button(doc, 'restore', 'Restore (M)', ui.restore),
+    mini.append(
+      miniPlay, title,
+      button(doc, 'restore', 'Restore (M)', size.restore),
       button(doc, 'close', 'Close', () => pip.close()),
     );
 
@@ -296,88 +259,34 @@
     on(video, 'timeupdate', tick);
     sync(); tick();
 
-    on(ui.stage, 'click', () => (ui.isMin() ? ui.restore() : togglePlay()));
+    // Show the control bar while the mouse moves, hide it after 2s.
+    let hideTimer;
+    const poke = () => {
+      doc.body.classList.add('active');
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => doc.body.classList.remove('active'), 2000);
+    };
+    on(doc, 'mousemove', poke);
+    poke();
+
+    const titleTimer = setInterval(() => { doc.title = title.textContent = document.title; }, 2000);
+
+    on(stage, 'click', () => (size.isMin() ? size.restore() : togglePlay()));
+    on(mini, 'dblclick', size.restore);
     on(doc, 'keydown', e => {
       if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); }
       else if (e.key === 'ArrowLeft') skip(-10);
       else if (e.key === 'ArrowRight') skip(10);
-      else if (e.key === 'm') ui.toggleMin();
+      else if (e.key === 'm') size.toggle();
     });
 
     on(pip, 'pagehide', () => {
       ac.abort();
+      clearInterval(titleTimer);
       video.controls = savedControls;
       if (placeholder.isConnected) placeholder.replaceWith(video);
     });
   }
 
-  // ---------- Whole-tab mode (live tab capture, view-only) ----------
-
-  async function captureTab() {
-    const res = await chrome.runtime.sendMessage({ type: 'streamId' });
-    if (!res || res.error) throw new Error(res?.error || 'Could not start tab capture');
-    return navigator.mediaDevices.getUserMedia({
-      audio: false, // leave the tab's own audio alone
-      video: {
-        mandatory: {
-          chromeMediaSource: 'tab',
-          chromeMediaSourceId: res.id,
-          maxWidth: 1920, maxHeight: 1080, maxFrameRate: 30,
-        },
-      },
-    });
-  }
-
-  async function openTab() {
-    if (closeExisting()) return;
-    if (window !== top) return;
-    if (!window.documentPictureInPicture) return notice('PiP Plus needs Chrome 116 or newer');
-
-    const pip = await requestWindow(480, Math.round(480 * innerHeight / innerWidth), openTab);
-    if (!pip) return;
-
-    let stream = null;
-    const stop = () => { stream?.getTracks().forEach(t => t.stop()); stream = null; };
-
-    const ui = shell(pip, 'tab', {
-      // Minimized = capture fully stopped, so it costs nothing while tucked away.
-      onMinimize: stop,
-      onRestore: () => start(),
-    });
-    const { doc } = ui;
-    const video = el(doc, 'video', { autoplay: true, muted: true, playsInline: true });
-    ui.stage.append(video);
-
-    async function start() {
-      ui.msg.textContent = 'Starting…';
-      try {
-        stop();
-        stream = await captureTab();
-        if (ui.isMin() || pip.closed) return stop();
-        video.srcObject = stream;
-        ui.msg.textContent = '';
-      } catch (e) {
-        ui.msg.textContent = 'Couldn’t capture this tab: ' + e.message;
-      }
-    }
-
-    ui.bar.append(
-      ui.title(),
-      button(doc, 'minimize', 'Minimize (M)', ui.minimize),
-      button(doc, 'toTab', 'Go to tab', ui.focusTab),
-    );
-    ui.mini.append(
-      ui.title(),
-      button(doc, 'restore', 'Restore (M)', ui.restore),
-      button(doc, 'close', 'Close', () => pip.close()),
-    );
-
-    ui.stage.addEventListener('click', ui.focusTab);
-    doc.addEventListener('keydown', e => { if (e.key === 'm') ui.toggleMin(); });
-    pip.addEventListener('pagehide', stop);
-
-    start();
-  }
-
-  window.__pipPlus = { score, openVideo, openTab };
+  window.__pipPlus = { score, openVideo };
 })();
