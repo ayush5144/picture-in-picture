@@ -14,4 +14,4 @@ A Chrome extension that floats a video in an always-on-top window, with a **mini
 - Minimize shrinks the window to a small bar in the bottom-right corner of the screen; restore puts it back where it was.
 - Videos inside iframes fall back to Chrome's built-in Picture-in-Picture (no minimize).
 
-Needs Chrome 116+ (Document Picture-in-Picture API).
+Needs Chrome 130+ (Document Picture-in-Picture API with `preferInitialWindowPlacement`).

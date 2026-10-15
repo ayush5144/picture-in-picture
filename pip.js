@@ -5,7 +5,6 @@
   const MINI_H = 40;       // inner height of the minimized bar
   const MINI_MAX_W = 340;
   const THUMB_W = 72;      // video thumbnail width while minimized
-  const CORNER_GAP = 16;   // distance from the screen edges when parked bottom-right
 
   const ICONS = {
     play:     ['M6 4l14 8-14 8z', true],
@@ -139,39 +138,9 @@
     });
   }
 
-  // ---------- Minimize / restore ----------
-
-  // Minimize shrinks the window to a bar and parks it in the bottom-right corner of the screen;
-  // restore puts it back at its old size and position.
-  function sizer(pip, doc) {
-    let saved = null;
-    const isMin = () => doc.body.classList.contains('min');
-
-    const minimize = () => {
-      if (isMin()) return;
-      saved = { w: pip.outerWidth, h: pip.outerHeight, x: pip.screenX, y: pip.screenY };
-      const w = Math.min(saved.w, MINI_MAX_W);
-      const h = MINI_H + (pip.outerHeight - pip.innerHeight);
-      doc.body.classList.add('min');
-      try { pip.resizeTo(w, h); } catch {}
-      const s = pip.screen;
-      const x = s.availLeft + s.availWidth - w - CORNER_GAP;
-      const y = s.availTop + s.availHeight - h - CORNER_GAP;
-      try { pip.moveTo(x, y); } catch {}
-    };
-
-    const restore = () => {
-      if (!isMin()) return;
-      doc.body.classList.remove('min');
-      if (!saved) return;
-      try { pip.resizeTo(saved.w, saved.h); } catch {}
-      try { pip.moveTo(saved.x, saved.y); } catch {}
-    };
-
-    return { isMin, minimize, restore, toggle: () => (isMin() ? restore() : minimize()) };
-  }
-
   // ---------- Open ----------
+
+  const log = (...a) => console.info('[PiP Plus]', ...a);
 
   async function openVideo() {
     if (window === top && window.documentPictureInPicture?.window) return documentPictureInPicture.window.close();
@@ -192,100 +161,162 @@
       else notice('PiP Plus: ' + e.message);
       return;
     }
+    session(video).mount(pip, false);
+  }
 
-    const doc = pip.document;
-    const sheet = new pip.CSSStyleSheet();
-    sheet.replaceSync(CSS);
-    doc.adoptedStyleSheets = [sheet];
-    doc.title = document.title;
-
-    const stage = el(doc, 'div', { id: 'stage' });
-    const bar = el(doc, 'div', { id: 'bar', class: 'row' });
-    const mini = el(doc, 'div', { id: 'mini', class: 'row' });
-    doc.body.append(stage, bar, mini);
-
-    const ac = new AbortController();
-    const on = (t, ev, fn) => t.addEventListener(ev, fn, { signal: ac.signal });
-    const size = sizer(pip, doc);
-
-    // Move the real <video> into the window (same decoder, no copy), leave a placeholder.
+  // One floating-video session. It can span several windows: Chrome can't move a PiP window,
+  // so minimize swaps to a fresh small window opened at Chrome's default spot (bottom-right),
+  // and restore swaps back to a full-size one. The same <video> element moves between them.
+  function session(video) {
     const placeholder = document.createElement('div');
     placeholder.style.cssText = video.style.cssText;
     placeholder.style.background = '#000';
     const savedControls = video.controls;
     video.replaceWith(placeholder);
     video.controls = false;
-    stage.append(video);
 
-    const togglePlay = () => (video.paused ? video.play() : video.pause());
-    const skip = s => { video.currentTime = Math.max(0, Math.min(video.duration || Infinity, video.currentTime + s)); };
-    const backToTab = () => { pip.close(); chrome.runtime.sendMessage({ type: 'focusTab' }); };
+    let current = null;   // the live PiP window
+    let swapping = false;
+    let normalSize = null; // inner size to return to on restore
 
-    const play = button(doc, 'pause', 'Play/Pause (Space)', togglePlay);
-    const miniPlay = button(doc, 'pause', 'Play/Pause', togglePlay);
-    const mute = button(doc, 'vol', 'Mute', () => { video.muted = !video.muted; });
-    const seek = el(doc, 'input', { type: 'range', min: 0, max: 1000, value: 0 });
-    const time = el(doc, 'div', { class: 'time' });
-    const title = el(doc, 'div', { class: 'title', textContent: document.title });
-    let seeking = false;
-    seek.addEventListener('input', () => { seeking = true; if (video.duration) video.currentTime = seek.value / 1000 * video.duration; });
-    seek.addEventListener('change', () => { seeking = false; });
-
-    bar.append(
-      play,
-      button(doc, 'back', 'Back 10s (←)', () => skip(-10)),
-      button(doc, 'fwd', 'Forward 10s (→)', () => skip(10)),
-      seek, time, mute,
-      button(doc, 'minimize', 'Minimize (M)', size.minimize),
-      button(doc, 'toTab', 'Back to tab', backToTab),
-    );
-    mini.append(
-      miniPlay, title,
-      button(doc, 'restore', 'Restore (M)', size.restore),
-      button(doc, 'close', 'Close', () => pip.close()),
-    );
-
-    const sync = () => {
-      const icon = video.paused ? 'play' : 'pause';
-      play.setIcon(icon); miniPlay.setIcon(icon);
-      doc.body.classList.toggle('paused', video.paused);
-      mute.setIcon(video.muted ? 'muted' : 'vol');
-    };
-    const tick = () => {
-      if (!seeking && video.duration) seek.value = video.currentTime / video.duration * 1000;
-      time.textContent = `${fmt(video.currentTime)} / ${fmt(video.duration)}`;
-    };
-    for (const ev of ['play', 'pause', 'volumechange']) on(video, ev, sync);
-    on(video, 'timeupdate', tick);
-    sync(); tick();
-
-    // Show the control bar while the mouse moves, hide it after 2s.
-    let hideTimer;
-    const poke = () => {
-      doc.body.classList.add('active');
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => doc.body.classList.remove('active'), 2000);
-    };
-    on(doc, 'mousemove', poke);
-    poke();
-
-    const titleTimer = setInterval(() => { doc.title = title.textContent = document.title; }, 2000);
-
-    on(stage, 'click', () => (size.isMin() ? size.restore() : togglePlay()));
-    on(mini, 'dblclick', size.restore);
-    on(doc, 'keydown', e => {
-      if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); }
-      else if (e.key === 'ArrowLeft') skip(-10);
-      else if (e.key === 'ArrowRight') skip(10);
-      else if (e.key === 'm') size.toggle();
-    });
-
-    on(pip, 'pagehide', () => {
-      ac.abort();
-      clearInterval(titleTimer);
+    const teardown = () => {
       video.controls = savedControls;
       if (placeholder.isConnected) placeholder.replaceWith(video);
-    });
+    };
+
+    async function swap(min, size) {
+      swapping = true;
+      try {
+        const next = await documentPictureInPicture.requestWindow(
+          { width: size.w, height: size.h, preferInitialWindowPlacement: min });
+        mount(next, min);
+        log(min ? 'minimized: reopened bottom-right' : 'restored');
+        return true;
+      } catch (e) {
+        log('could not reopen window (' + e.name + '), changing size in place instead');
+        return false;
+      } finally {
+        swapping = false;
+      }
+    }
+
+    function mount(pip, startMin) {
+      current = pip;
+      const doc = pip.document;
+      const sheet = new pip.CSSStyleSheet();
+      sheet.replaceSync(CSS);
+      doc.adoptedStyleSheets = [sheet];
+      doc.title = document.title;
+      if (startMin) doc.body.classList.add('min');
+
+      const stage = el(doc, 'div', { id: 'stage' });
+      const bar = el(doc, 'div', { id: 'bar', class: 'row' });
+      const mini = el(doc, 'div', { id: 'mini', class: 'row' });
+      doc.body.append(stage, bar, mini);
+      stage.append(video);
+
+      const ac = new AbortController();
+      const on = (t, ev, fn) => t.addEventListener(ev, fn, { signal: ac.signal });
+
+      // Minimize/restore. inPlace = the fallback when Chrome refused to open a new window.
+      let inPlace = null;
+      const isMin = () => doc.body.classList.contains('min');
+      const minimize = async () => {
+        if (isMin()) return;
+        normalSize = { w: pip.innerWidth, h: pip.innerHeight };
+        const w = Math.min(pip.innerWidth, MINI_MAX_W);
+        if (await swap(true, { w, h: MINI_H })) return;
+        inPlace = { w: pip.outerWidth, h: pip.outerHeight };
+        doc.body.classList.add('min');
+        try { pip.resizeTo(Math.min(inPlace.w, MINI_MAX_W), MINI_H + pip.outerHeight - pip.innerHeight); } catch {}
+      };
+      const restore = async () => {
+        if (!isMin()) return;
+        if (inPlace) {
+          doc.body.classList.remove('min');
+          try { pip.resizeTo(inPlace.w, inPlace.h); } catch {}
+          inPlace = null;
+          return;
+        }
+        const size = normalSize || { w: 480, h: 270 };
+        if (await swap(false, size)) return;
+        doc.body.classList.remove('min');
+        try { pip.resizeTo(size.w, size.h + pip.outerHeight - pip.innerHeight); } catch {}
+      };
+      const toggleMin = () => (isMin() ? restore() : minimize());
+
+      const togglePlay = () => (video.paused ? video.play() : video.pause());
+      const skip = s => { video.currentTime = Math.max(0, Math.min(video.duration || Infinity, video.currentTime + s)); };
+      const backToTab = () => { pip.close(); chrome.runtime.sendMessage({ type: 'focusTab' }); };
+
+      const play = button(doc, 'pause', 'Play/Pause (Space)', togglePlay);
+      const miniPlay = button(doc, 'pause', 'Play/Pause', togglePlay);
+      const mute = button(doc, 'vol', 'Mute', () => { video.muted = !video.muted; });
+      const seek = el(doc, 'input', { type: 'range', min: 0, max: 1000, value: 0 });
+      const time = el(doc, 'div', { class: 'time' });
+      const title = el(doc, 'div', { class: 'title', textContent: document.title });
+      let seeking = false;
+      seek.addEventListener('input', () => { seeking = true; if (video.duration) video.currentTime = seek.value / 1000 * video.duration; });
+      seek.addEventListener('change', () => { seeking = false; });
+
+      bar.append(
+        play,
+        button(doc, 'back', 'Back 10s (←)', () => skip(-10)),
+        button(doc, 'fwd', 'Forward 10s (→)', () => skip(10)),
+        seek, time, mute,
+        button(doc, 'minimize', 'Minimize (M)', minimize),
+        button(doc, 'toTab', 'Back to tab', backToTab),
+      );
+      mini.append(
+        miniPlay, title,
+        button(doc, 'restore', 'Restore (M)', restore),
+        button(doc, 'close', 'Close', () => pip.close()),
+      );
+
+      const sync = () => {
+        const icon = video.paused ? 'play' : 'pause';
+        play.setIcon(icon); miniPlay.setIcon(icon);
+        doc.body.classList.toggle('paused', video.paused);
+        mute.setIcon(video.muted ? 'muted' : 'vol');
+      };
+      const tick = () => {
+        if (!seeking && video.duration) seek.value = video.currentTime / video.duration * 1000;
+        time.textContent = `${fmt(video.currentTime)} / ${fmt(video.duration)}`;
+      };
+      for (const ev of ['play', 'pause', 'volumechange']) on(video, ev, sync);
+      on(video, 'timeupdate', tick);
+      sync(); tick();
+
+      // Show the control bar while the mouse moves, hide it after 2s.
+      let hideTimer;
+      const poke = () => {
+        doc.body.classList.add('active');
+        clearTimeout(hideTimer);
+        hideTimer = setTimeout(() => doc.body.classList.remove('active'), 2000);
+      };
+      on(doc, 'mousemove', poke);
+      poke();
+
+      const titleTimer = setInterval(() => { doc.title = title.textContent = document.title; }, 2000);
+
+      on(stage, 'click', () => (isMin() ? restore() : togglePlay()));
+      on(mini, 'dblclick', restore);
+      on(doc, 'keydown', e => {
+        if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); }
+        else if (e.key === 'ArrowLeft') skip(-10);
+        else if (e.key === 'ArrowRight') skip(10);
+        else if (e.key === 'm') toggleMin();
+      });
+
+      // A window being swapped out only drops its listeners; the last one closing ends the session.
+      on(pip, 'pagehide', () => {
+        ac.abort();
+        clearInterval(titleTimer);
+        if (!swapping && current === pip) teardown();
+      });
+    }
+
+    return { mount };
   }
 
   window.__pipPlus = { score, openVideo };
