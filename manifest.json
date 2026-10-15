@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "PiP Plus",
+  "version": "1.0.0",
+  "description": "Float a video or a whole tab in an always-on-top window, with a minimize button.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "tabCapture"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "PiP Plus" },
+  "commands": {
+    "video-pip": {
+      "suggested_key": { "default": "Alt+Shift+V" },
+      "description": "Float the video on this page"
+    },
+    "tab-pip": {
+      "suggested_key": { "default": "Alt+Shift+T" },
+      "description": "Float this whole tab"
+    }
+  }
+}
